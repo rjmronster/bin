@@ -1,0 +1,9 @@
+#!/bin/csh -f
+echo C 299792458
+echo L 1.2575e9
+echo W-Pband 0.697191762790698
+echo W-Lband 0.238403545129225
+echo W-Sband 0.093685143125
+echo W-Cband 0.05546576
+echo R 1.66551365555556
+echo KA-band 0.008406967414469994
