@@ -1,0 +1,232 @@
+#include "corner.h"
+#include "corner_prototype.h"
+
+double corner_model_sqr( int corner_number, double orientation, double elevation, double side_length, double scale_factor,
+                         double hdg, vector look_T2P, double wavelength, boolean debug_print,
+                         boolean *common_rcs, double *elevation_max, double *rcs_max,
+                         double *drcs_del, double *drcs_daz, double *drcs_dK ) 
+{ 
+
+/* input orientation and elevation is in degrees, side_length is meters, scale_factor should be 1, hdg is degrees, wavelength is meters */
+/* look_T2P is unit vector, common_rcs is output boolean to tell if in normal region */
+/* output elevation_max is degrees, rcs_max is dB, drcs_del is rcs(dB)/radians and so is drcs_daz, drcs_dK is rcs(dB)/unitless */
+
+   double ln10 = 2.30258509;
+   double sqrt3 = sqrt( 3.0 );
+   double prefactor; 
+   vector unit_boresight;
+
+   double pz;
+   double py;
+   double px;
+   double pxMax;
+   double pyMax;
+   double pzMax;
+   double look_angle;
+   double elev_max;
+
+   double Zrotation1;    /* realignment */
+   double Zrotation2;    /* orientation */
+   double Xrotation;     /* elevation   */
+   double XrotationMax;  /* elevation for Max return */
+
+   matrix m_Zrot1;
+   matrix m_Zrot2;
+   matrix m_Xrot;
+   matrix m_XrotMax;
+   vector bore_plane;
+   matrix m_plane2sch;
+   matrix m_plane2schMax;
+   vector bore_sch;
+   vector bore_schMax;
+   double lookDotBore;
+   double lookDotBoreMax;
+   double rcs;
+
+   matrix m_xyz2sch;
+   matrix m_xyz2schT;
+   matrix m_xyz2schMax;
+   matrix m_xyz2schMaxT;
+   vector BoreVector;
+   vector BoreVectorMax;
+   double c1, c2, c3;
+   double c1Max, c2Max, c3Max;
+
+   matrix m_Xdot;
+   matrix m_Zdot2;
+   matrix m_plane2sch_eldot;
+   matrix m_plane2sch_azdot;
+   vector dbore_del;
+   vector dbore_daz;
+   double lookDotBore_del;
+   double lookDotBore_daz;
+
+   double rcs_c1c2c3;
+   double rcs_c1c2c3Max;
+   matrix m_tel, m_telT, m_taz, m_tazT;
+   vector BoreVector_del;
+   vector BoreVector_daz;
+   double rcs_del2;
+   double rcs_daz2;
+
+   double c1elp, c2elp, c3elp;
+   double c1azp, c2azp, c3azp;
+
+   unit_boresight = vector_create(3);
+   unit_boresight.value[0] = 1.0/sqrt3;
+   unit_boresight.value[1] = 1.0/sqrt3;
+   unit_boresight.value[2] = 1.0/sqrt3;
+
+   look_angle = atan2( -look_T2P.value[1], look_T2P.value[2] );
+   look_angle = acos ( look_T2P.value[2] );
+   /* look_angle += roll_com; BAD IDEA,  positive roll would increase the look angle */
+   /* alter T2P by the roll angle */
+   /* look_T2P.value[2] =  cos( look_angle ); */
+   /* look_T2P.value[1] = -sin( look_angle ); */
+
+   elev_max = PI/2 - look_angle - atan( 1.0/sqrt(2.0) );
+   elev_max *= Rad2Deg;
+   *elevation_max = elev_max;
+
+   prefactor = 4.0 * PI * pow( side_length, 4 ) / wavelength / wavelength * scale_factor;
+   if ( hdg < 0 ) hdg += 360.0;
+   if ( orientation < 0 ) orientation += 360.0;
+
+   Zrotation1   =  45 + 90;
+fprintf( stderr, "orientation %8.2f hdg %8.2f Zrot2 %8.2f\n", orientation, hdg, orientation - hdg );
+   Zrotation2   =  orientation - hdg;
+   Xrotation    =  elevation;
+   XrotationMax =  elev_max;
+
+   m_Zrot1    = rotmat( Zrotation1  *Deg2Rad, 3 );
+   m_Zrot2    = rotmat( Zrotation2  *Deg2Rad, 3 ); /* heading       */
+   m_Xrot     = rotmat( Xrotation   *Deg2Rad, 1 ); /* elevation     */
+   m_XrotMax  = rotmat( XrotationMax*Deg2Rad, 1 ); /* elevation max */
+
+   /* not computing m_ZrotMax which should be when Zrotation2 is 0  */
+   
+   /* x is S direction, y is -C direction, z is up/H */
+   bore_plane = mXv( m_Zrot1, unit_boresight );  /* rotate to  0, -2.0/sqrt(6.0), sqrt(2.0)/sqrt(6.0) */
+
+   m_plane2sch    = mXm( m_Zrot2, m_Xrot );
+   m_plane2schMax = mXm( m_Zrot2, m_XrotMax );
+
+   m_xyz2sch     = mXm( m_plane2sch,    m_Zrot1 );
+   m_xyz2schT    = mT( m_xyz2sch );
+   BoreVector    = mXv( m_xyz2schT,    look_T2P );
+   m_xyz2schMax  = mXm( m_plane2schMax, m_Zrot1 );
+   m_xyz2schMaxT = mT( m_xyz2schMax );
+   BoreVectorMax = mXv( m_xyz2schMaxT, look_T2P );
+
+   order_bore_vector( BoreVector,    &c1,    &c2,    &c3    );  /* c3 is largest, c1 is smallest */
+   order_bore_vector( BoreVectorMax, &c1Max, &c2Max, &c3Max );  /* c3 is largest, c1 is smallest */
+
+   bore_sch    = mXv( m_plane2sch,    bore_plane );
+   bore_schMax = mXv( m_plane2schMax, bore_plane );
+
+   lookDotBore    =  array_dot( bore_sch.value,    look_T2P.value, 3 );
+   lookDotBoreMax =  array_dot( bore_schMax.value, look_T2P.value, 3 );
+
+   *common_rcs = ( c2 >= c3/2.0 ) ? true : false;
+
+   if ( debug_print ) fprintf( stderr, "model_sqr cornerNumber %2d incidence(deg): %12.4f lookDotBore: %10.8f (degs): %10.8f valueOfBoreVector %6.4f %6.4f %6.4f common %d\n", 
+                                        corner_number, look_angle*Rad2Deg, lookDotBore, acos(lookDotBore)*Rad2Deg, c1, c2, c3, (int) *common_rcs );
+
+
+   if ( lookDotBore < 0 ) {
+
+      vector_destroy( &unit_boresight );
+      matrix_destroy( &m_Zrot1   );
+      matrix_destroy( &m_Zrot2   );
+      matrix_destroy( &m_Xrot    );
+      matrix_destroy( &m_XrotMax );
+      vector_destroy( &bore_plane );
+      matrix_destroy( &m_xyz2sch );
+      matrix_destroy( &m_xyz2schT );
+      matrix_destroy( &m_xyz2schMax );
+      matrix_destroy( &m_xyz2schMaxT );
+      vector_destroy( &BoreVector );
+      vector_destroy( &BoreVectorMax );
+      vector_destroy( &bore_sch );
+      vector_destroy( &bore_schMax );
+   
+      *rcs_max  = 0.0;
+      *drcs_del = 0.0;
+      *drcs_daz = 0.0;
+      *drcs_dK  = 0.0;
+      rcs = 0.0;
+      return rcs;
+   }
+
+   if ( *common_rcs ) {
+      rcs_c1c2c3    = prefactor * pow( 4.0 * c1    - c1   *  c3    / c2,   2 );
+      rcs_c1c2c3Max = prefactor * pow( 4.0 * c1Max - c1Max * c3Max / c2Max, 2 );
+   } else {
+      rcs_c1c2c3    = prefactor * pow( 4.0 * c1    * c2    / c3,    2 );
+      rcs_c1c2c3Max = prefactor * pow( 4.0 * c1Max * c2Max / c3Max, 2 );
+   }
+
+   /* now the derivativs of lookDotBore wrt elevation and wrt azimuth */
+   m_Xdot    = rotdotmat( Xrotation *Deg2Rad, 1); 
+   m_Zdot2   = rotdotmat( Zrotation2*Deg2Rad, 3);
+   m_plane2sch_eldot = mXm( m_Zrot2, m_Xdot );
+   m_plane2sch_azdot = mXm( m_Zdot2, m_Xrot );
+
+   dbore_del = mXv( m_plane2sch_eldot, bore_plane );
+   dbore_daz = mXv( m_plane2sch_azdot, bore_plane );
+   lookDotBore_del = array_dot( look_T2P.value, dbore_del.value, 3 );
+   lookDotBore_daz = array_dot( look_T2P.value, dbore_daz.value, 3 );
+
+   m_tel = mXm( m_plane2sch_eldot, m_Zrot1 );
+   m_telT = mT( m_tel );
+   m_taz = mXm( m_plane2sch_azdot, m_Zrot1 );
+   m_tazT = mT( m_taz );
+   BoreVector_del = mXv( m_telT, look_T2P );
+   BoreVector_daz = mXv( m_tazT, look_T2P );
+   reorder_bore_vector( BoreVector, BoreVector_del, &c1elp, &c2elp, &c3elp );  /* c3 is largest, c1 is smallest */
+   reorder_bore_vector( BoreVector, BoreVector_daz, &c1azp, &c2azp, &c3azp );  /* c3 is largest, c1 is smallest */
+
+   if ( *common_rcs ) {
+      rcs_del2 = prefactor * 2.0 * ( 4.0*c1 - c1*c3/c2 ) * ( 4.0 * c1elp - ((c2*c1elp*c3 + c2*c1*c3elp - c1*c3*c2elp)/c2/c2) );
+      rcs_daz2 = prefactor * 2.0 * ( 4.0*c1 - c1*c3/c2 ) * ( 4.0 * c1azp - ((c2*c1azp*c3 + c2*c1*c3azp - c1*c3*c2azp)/c2/c2) );
+   } else {
+      rcs_del2 = prefactor * 2.0 * ( 4.0*c1*c2/c3 ) * ( c3 * 4.0 * ( c1elp * c2 + c1 * c2elp ) - 4.0*c1*c2 * c3elp )  / c3 / c3;
+      rcs_daz2 = prefactor * 2.0 * ( 4.0*c1*c2/c3 ) * ( c3 * 4.0 * ( c1azp * c2 + c1 * c2azp ) - 4.0*c1*c2 * c3azp )  / c3 / c3;
+   }
+
+   /* convert partials to dB */
+   *rcs_max  = 10.0 * log10 ( rcs_c1c2c3Max );
+   *drcs_del = rcs_del2*10.0/rcs_c1c2c3/ln10;
+   *drcs_daz = rcs_daz2*10.0/rcs_c1c2c3/ln10; 
+   *drcs_dK  = rcs_c1c2c3/scale_factor*10.0/rcs_c1c2c3/ln10;
+   rcs = 10.0 * log10 ( rcs_c1c2c3 );
+
+   vector_destroy( &unit_boresight );
+   matrix_destroy( &m_Zrot1   );
+   matrix_destroy( &m_Zrot2   );
+   matrix_destroy( &m_Xrot    );
+   matrix_destroy( &m_XrotMax );
+   vector_destroy( &bore_plane );
+   matrix_destroy( &m_xyz2sch );
+   matrix_destroy( &m_xyz2schT );
+   matrix_destroy( &m_xyz2schMax );
+   matrix_destroy( &m_xyz2schMaxT );
+   vector_destroy( &BoreVector );
+   vector_destroy( &BoreVectorMax );
+   vector_destroy( &bore_sch );
+   vector_destroy( &bore_schMax );
+
+   matrix_destroy( &m_Xdot );
+   matrix_destroy( &m_Zdot2 );
+   matrix_destroy( &m_plane2sch_eldot );
+   matrix_destroy( &m_plane2sch_azdot );
+   vector_destroy( &dbore_del );
+   vector_destroy( &dbore_daz );
+   matrix_destroy( &m_tel );
+   matrix_destroy( &m_telT );
+   matrix_destroy( &m_taz );
+   matrix_destroy( &m_tazT );
+   vector_destroy( &BoreVector_del );
+   vector_destroy( &BoreVector_daz );
+   return rcs;
+}
